@@ -1,0 +1,74 @@
+name: Weekly YouTube Backup
+
+on:
+  push: 
+    branches:
+      - dontrun
+  # workflow_dispatch:
+  # schedule:
+  #   - cron: "0 2 */7 * *"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+
+      - name: Install ffmpeg and yt-dlp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3-pip
+          python3 -m pip install --upgrade yt-dlp
+
+      - name: Restore upload state cache
+        id: restore-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: uploads_state.json
+          key: yt-backup-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            yt-backup-state-${{ github.ref_name }}-
+
+      - name: Prepare secrets
+        env:
+          CLIENT_SECRET_JSON: ${{ secrets.YT_CLIENT_SECRET_JSON }}
+          TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
+        run: |
+          if [ -z "$CLIENT_SECRET_JSON" ]; then
+            echo "YT_CLIENT_SECRET_JSON is required"
+            exit 1
+          fi
+
+          printf '%s' "$CLIENT_SECRET_JSON" > client_secret.json
+
+          if [ -n "$TOKEN_JSON" ]; then
+            printf '%s' "$TOKEN_JSON" > token.json
+          fi
+
+          touch uploads_state.json
+
+      - name: Run backup sync
+        env:
+          SOURCE_CHANNEL: ${{ secrets.SOURCE_CHANNEL }}
+          UPLOAD_PRIVACY: private
+          PLAYLIST_PRIVACY: private
+          MAX_WORKERS: 2
+          NON_INTERACTIVE_AUTH: true
+          UPLOAD_STATE_FILE: uploads_state.json
+          CLIENT_SECRET_FILE: client_secret.json
+          TOKEN_FILE: token.json
+        run: go run .
+
+      - name: Save upload state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: uploads_state.json
+          key: yt-backup-state-${{ github.ref_name }}-${{ github.run_id }}
