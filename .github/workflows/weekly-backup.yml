@@ -1,12 +1,11 @@
 name: Weekly YouTube Backup
 
 on:
-  push: 
-    branches:
-      - dontrun
-  # workflow_dispatch:
+  # Schedule is disabled during phase-1 development; enable once the
+  # modular refactor is merged and secrets are configured.
   # schedule:
   #   - cron: "0 2 */7 * *"
+  workflow_dispatch:
 
 jobs:
   backup:
@@ -32,9 +31,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: uploads_state.json
-          key: yt-backup-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: yt-backup-state-${{ github.ref_name }}
           restore-keys: |
-            yt-backup-state-${{ github.ref_name }}-
+            yt-backup-state-
 
       - name: Prepare secrets
         env:
@@ -54,6 +53,15 @@ jobs:
 
           touch uploads_state.json
 
+      - name: Validate non-interactive auth requirements
+        env:
+          TOKEN_JSON: ${{ secrets.YT_TOKEN_JSON }}
+        run: |
+          if [ -z "$TOKEN_JSON" ]; then
+            echo "::error::YT_TOKEN_JSON secret is required for non-interactive auth"
+            exit 1
+          fi
+
       - name: Run backup sync
         env:
           SOURCE_CHANNEL: ${{ secrets.SOURCE_CHANNEL }}
@@ -71,4 +79,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: uploads_state.json
-          key: yt-backup-state-${{ github.ref_name }}-${{ github.run_id }}
+          key: yt-backup-state-${{ github.ref_name }}
