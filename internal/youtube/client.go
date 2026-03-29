@@ -329,25 +329,37 @@ func (c *Client) EnsureVideoInPlaylists(ctx context.Context, videoID string, pla
 		return nil
 	}
 
+	// Load playlists under lock, then release before network calls.
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if err := c.loadOwnPlaylistsLocked(ctx); err != nil {
+		c.mu.Unlock()
 		return err
 	}
+	c.mu.Unlock()
 
 	for _, title := range titles {
+		// Resolve playlist ID under lock (may create playlist via API).
+		c.mu.Lock()
 		playlistID, err := c.ensurePlaylistLocked(ctx, title, playlistPrivacy)
 		if err != nil {
+			c.mu.Unlock()
 			return err
 		}
 		if err := c.ensurePlaylistVideoSetLocked(ctx, playlistID); err != nil {
+			c.mu.Unlock()
 			return err
 		}
+		alreadyPresent := false
 		if _, exists := c.playlistVideoSet[playlistID][videoID]; exists {
+			alreadyPresent = true
+		}
+		c.mu.Unlock()
+
+		if alreadyPresent {
 			continue
 		}
 
+		// Insert is a network call; execute without holding the mutex.
 		item := &ytv3.PlaylistItem{
 			Snippet: &ytv3.PlaylistItemSnippet{
 				PlaylistId: playlistID,
@@ -360,7 +372,11 @@ func (c *Client) EnsureVideoInPlaylists(ctx context.Context, videoID string, pla
 		if _, err := c.service.PlaylistItems.Insert([]string{"snippet"}, item).Do(); err != nil {
 			return fmt.Errorf("add video %s to playlist %s: %w", videoID, title, err)
 		}
+
+		// Update the cache under lock.
+		c.mu.Lock()
 		c.playlistVideoSet[playlistID][videoID] = struct{}{}
+		c.mu.Unlock()
 	}
 
 	return nil
