@@ -1,4 +1,7 @@
 client_secret.json
 token.json
 temp
-upload*
+uploaded.txt
+
+# Track the seed state file so Docker bind-mount doesn't create a directory
+!uploads_state.json

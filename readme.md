@@ -1,88 +1,121 @@
-# YouTube Channel Auto-Uploader
+# YouTube Backup Migrator
 
-A Go-based script that automatically scrapes a target YouTube channel, downloads its videos using `yt-dlp`, and re-uploads them to your authenticated YouTube channel using the **YouTube Data API v3**. 
+A Go application that mirrors a source YouTube channel into your backup channel with idempotent reruns.
 
-This script natively tracks videos that have already been uploaded (via `uploaded.txt`) so it never uploads duplicates. It deletes temporary video files automatically, and **deletes the YouTube API authentication token** upon finishing so you can re-authenticate freely.
+## What It Does
 
-## 📋 Prerequisites
+- Scans all source uploads from a source channel URL.
+- Mirrors source playlist memberships:
+  - discovers playlists from the source channel,
+  - creates missing playlists in your destination channel,
+  - adds each uploaded/matched video to the equivalent destination playlists.
+- Prevents duplicate uploads on reruns using three layers:
+  - persisted state file (`uploads_state.json`),
+  - source-ID marker embedded in uploaded video descriptions,
+  - destination title matching fallback.
+- Supports scheduled CI/CD backups (weekly cron workflow included).
 
-Before running the application, make sure you have the following installed on your system:
-1. **[Go](https://go.dev/dl/)**: Ensure Go (v1.18+) is installed.
-2. **[yt-dlp](https://github.com/yt-dlp/yt-dlp#installation)**: Must be installed and accessible in your system's PATH.
-3. **[ffmpeg](https://ffmpeg.org/download.html)**: Must be installed and in your system's PATH (required by yt-dlp to merge high-quality video and audio tracks).
+## Architecture (LLD)
 
----
+Business logic is moved outside `main` into focused packages:
 
-## ⚙️ Google Cloud API Setup (Step-by-Step)
+- `internal/config`: env parsing and runtime config.
+- `internal/ytdlp`: source scanning and media download.
+- `internal/youtube`: YouTube Data API client, playlist sync, destination inventory.
+- `internal/state`: persisted upload registry.
+- `internal/syncer`: orchestration flow (scan -> dedupe -> upload -> playlist attach).
+- `internal/app`: composition root used by `main.go`.
 
-To upload to your channel, you need to generate a `client_secret.json` file from Google Cloud.
+`main.go` is intentionally thin.
 
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a new Project (or select an existing one).
-3. **Enable the API**:
-   - Go to **APIs & Services > Library**.
-   - Search for **YouTube Data API v3** and click **Enable**.
-4. **Configure OAuth Consent Screen**:
-   - Go to **APIs & Services > OAuth consent screen**.
-   - Choose **External** and click **Create**.
-   - Fill in the required fields (App name, support email, developer email).
-   - Under **Test Users**, click **ADD USERS** and **add the Google/YouTube email address** you plan to upload videos to! *(If you skip this, Google will block you from authenticating).*
-   - Save and continue.
-5. **Create Credentials**:
-   - Go to **APIs & Services > Credentials**.
-   - Click **Create Credentials** > **OAuth client ID**.
-   - For *Application type*, select **Desktop app** (give it any name).
-   - Click **Create**.
-6. **Download**:
-   - Click the "Download JSON" button on the popup (or the down arrow icon next to your new credential).
-   - Rename the downloaded file to exactly **`client_secret.json`**.
-   - Place this file in the exact same folder as your `main.go` code.
+## Prerequisites
 
----
+- Go 1.25+
+- `yt-dlp`
+- `ffmpeg`
+- Google OAuth credentials (`client_secret.json`)
 
-## ▶️ Running the Application
+Enable YouTube Data API v3 and create an OAuth Desktop App client in Google Cloud.
 
-1. Open your terminal in the project directory.
-2. Run the code:
-   ```bash
-   go run main.go
-   ```
-3. **Authentication (First Run)**:
-   - The terminal will print a Google authorization link.
-   - Ctrl+Click (or copy-paste) the link into your browser.
-   - Log into the Google account that owns the channel you want to upload *to*.
-   - Click **Continue** (ignore the "Google hasn't verified this app" warning by clicking Advanced -> Continue).
-   - Grant the required permissions.
-   - Copy the authorization code provided at the end.
-   - Paste it back into your terminal and hit Enter.
-4. The script will automatically scrape the channel, download videos, and upload them! 
+## Configuration
 
-> **Note on Token Deletion**: As configured, the application deletes `token.json` automatically once the script finishes running. This means you will need to re-authorize the application the next time you run it. 
+Create `.env`:
 
----
+```env
+# Source channel to back up (URL or handle URL)
+SOURCE_CHANNEL="https://www.youtube.com/@YourSourceChannel"
 
-## 🐳 Running with Docker
+# Upload behavior
+UPLOAD_PRIVACY="private"
+PLAYLIST_PRIVACY="private"
+MAX_WORKERS=3
 
-You can also run the application using Docker and Docker Compose. This avoids needing to install Go, `yt-dlp`, and `ffmpeg` locally.
+# Paths
+TEMP_DIR="temp"
+UPLOAD_STATE_FILE="uploads_state.json"
+LEGACY_UPLOADED_FILE="uploaded.txt"
+CLIENT_SECRET_FILE="client_secret.json"
+TOKEN_FILE="token.json"
 
-1. Ensure your `.env` and `client_secret.json` are in the project root.
-2. Build and start the container in detached mode:
-   ```bash
-   docker compose up -d
-   ```
-3. **Authentication (First Run)**:
-   Since the container requires interactive authorization the first time, attach to it to see the prompts:
-   ```bash
-   docker attach ytclone
-   ```
-   Follow the authorization link, paste your authorization code in the terminal, and press `Enter`. 
-   You can then safely detach from the container's output by pressing `Ctrl+P`, then `Ctrl+Q`.
+# Auth behavior
+NON_INTERACTIVE_AUTH=false
+DELETE_TOKEN_ON_EXIT=false
 
----
+# Optional: raw JSON token for CI/non-interactive runs
+# YT_TOKEN_JSON='{"access_token":"...","refresh_token":"..."}'
+```
 
-## 📂 File Explanations
-- `main.go`: The core application code.
-- `client_secret.json`: Your private Google OAuth credentials.
-- `.env`: Holds configurations (target channel, max workers, privacy).
-- `uploaded.txt`: Auto-generated by the script. It logs the IDs of successfully uploaded videos so they aren't downloaded/uploaded twice.
-- `temp/`: An auto-generated folder where `yt-dlp` stores videos before they get uploaded. (Files here get deleted automatically).
+Backward compatibility:
+
+- If `uploads_state.json` is missing and `uploaded.txt` exists, legacy IDs are auto-imported.
+
+## Run Locally
+
+```bash
+go run .
+```
+
+First run (interactive):
+
+- Script prints OAuth URL.
+- Authorize with destination channel account.
+- Paste auth code in terminal.
+
+## Docker
+
+```bash
+docker compose up -d
+```
+
+Mounted files:
+
+- `.env`
+- `client_secret.json`
+- `uploads_state.json`
+- `uploaded.txt` (legacy import path)
+- `temp/`
+
+## CI/CD Weekly Backup
+
+Workflow file: `.github/workflows/weekly-backup.yml`
+
+Runs:
+
+- every 7 days via cron
+- manually via `workflow_dispatch`
+
+Required GitHub Secrets:
+
+- `YT_CLIENT_SECRET_JSON` (full JSON content)
+- `YT_TOKEN_JSON` (full token JSON, recommended for non-interactive runs)
+- `SOURCE_CHANNEL`
+
+State persistence between workflow runs:
+
+- `uploads_state.json` is cached with GitHub Actions cache.
+
+## Notes
+
+- Dedupe by title is a fallback. Source-ID marker and state file are primary.
+- Playlists are matched by playlist title from source -> destination.
+- Private source playlists are not accessible unless authorized accordingly.
