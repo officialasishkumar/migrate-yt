@@ -19,11 +19,17 @@ type diskState struct {
 	Records []model.UploadRecord `json:"records"`
 }
 
+const defaultFlushThreshold = 25
+
 // Store persists upload records for idempotent reruns.
+// Writes are buffered and flushed after every flushThreshold upserts
+// or when Flush is called explicitly, avoiding O(n) disk writes per update.
 type Store struct {
-	path    string
-	mu      sync.Mutex
-	records map[string]model.UploadRecord
+	path           string
+	mu             sync.Mutex
+	records        map[string]model.UploadRecord
+	dirty          int
+	flushThreshold int
 }
 
 func New(path string, legacyUploadedFile string) (*Store, error) {
@@ -32,8 +38,9 @@ func New(path string, legacyUploadedFile string) (*Store, error) {
 	}
 
 	s := &Store{
-		path:    path,
-		records: make(map[string]model.UploadRecord),
+		path:           path,
+		records:        make(map[string]model.UploadRecord),
+		flushThreshold: defaultFlushThreshold,
 	}
 
 	if err := s.load(); err != nil {
@@ -127,6 +134,23 @@ func (s *Store) Upsert(record model.UploadRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.records[record.SourceVideoID] = record
+	s.dirty++
+
+	if s.dirty >= s.flushThreshold {
+		return s.persistLocked()
+	}
+	return nil
+}
+
+// Flush writes any buffered changes to disk. Callers should invoke this
+// after a batch of Upsert calls completes (e.g. at the end of a sync run).
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.dirty == 0 {
+		return nil
+	}
 	return s.persistLocked()
 }
 
@@ -161,5 +185,6 @@ func (s *Store) persistLocked() error {
 	if err := os.Rename(tmp, s.path); err != nil {
 		return fmt.Errorf("replace state file: %w", err)
 	}
+	s.dirty = 0
 	return nil
 }

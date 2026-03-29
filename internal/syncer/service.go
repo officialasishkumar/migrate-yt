@@ -136,13 +136,27 @@ func (s *Service) Run(ctx context.Context) error {
 		pending = append(pending, pendingJob{video: video, playlists: playlists})
 	}
 
+	// Flush any buffered state writes from upserts in the dedup pass above.
+	if err := s.store.Flush(); err != nil {
+		return err
+	}
+
 	if len(pending) == 0 {
 		log.Printf("No pending uploads. Backup channel is already up to date.")
 		return nil
 	}
 
 	log.Printf("Pending uploads: %d", len(pending))
-	return s.processPending(ctx, pending)
+	err = s.processPending(ctx, pending)
+
+	// Flush remaining buffered state writes from the upload pass.
+	if flushErr := s.store.Flush(); flushErr != nil {
+		if err != nil {
+			return fmt.Errorf("sync error: %v; state flush error: %w", err, flushErr)
+		}
+		return flushErr
+	}
+	return err
 }
 
 func (s *Service) processPending(ctx context.Context, pending []pendingJob) error {
